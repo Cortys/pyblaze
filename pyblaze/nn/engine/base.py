@@ -1,14 +1,21 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from typing import Literal
 import torch
 import torch.nn as nn
 import torch.cuda as cuda
-from pyblaze.nn.callbacks import TrainingCallback, PredictionCallback, CallbackException, \
-    ValueTrainingCallback
+from pyblaze.nn.callbacks import (
+    TrainingCallback,
+    PredictionCallback,
+    CallbackException,
+    ValueTrainingCallback,
+)
 import pyblaze.nn.utils as xnnu
 from pyblaze.utils.torch import gpu_device, to_device
 from ._history import History
 from ._utils import forward
+
+GpuSpec = Literal["auto"] | bool | int | list[int] | None
 
 class Engine(TrainingCallback, PredictionCallback, ABC):
     """
@@ -21,7 +28,7 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
     independent, identically distributed data samples) and/or model types (e.g. GANs).
     """
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # ENGINE CONFIGURATION
     def supports_multiple_gpus(self):
         """
@@ -35,9 +42,9 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         """
         return True
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # INITIALIZATION
-    def __init__(self, model):
+    def __init__(self, model: torch.nn.Module):
         """
         Initializes a new engine for a specified model.
 
@@ -51,11 +58,23 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         self._cache = {}
         self._iteration = None
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # TRAINING
     # pylint: disable=too-many-branches,too-many-statements
-    def train(self, train_data, val_data=None, epochs=20, val_iterations=None, eval_every=None,
-              eval_train=False, eval_val=True, callbacks=None, metrics=None, gpu='auto', **kwargs):
+    def train(
+        self,
+        train_data,
+        val_data=None,
+        epochs=20,
+        val_iterations=None,
+        eval_every: int | None = None,
+        eval_train=False,
+        eval_val=True,
+        callbacks=None,
+        metrics=None,
+        gpu: GpuSpec = "auto",
+        **kwargs,
+    ):
         r"""
         Method for training the model with the supplied parameters.
 
@@ -122,7 +141,8 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         try:
             batch_iterations = len(train_data)
             iterable_data = False
-        except: # pylint: disable=bare-except
+        except:  # pylint: disable=bare-except
+            assert eval_every is not None
             batch_iterations = eval_every
             iterable_data = True
 
@@ -139,16 +159,19 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         callbacks += [v for _, v in kwargs.items() if isinstance(v, TrainingCallback)]
         # Then, we can extract the callbacks for training and prediction
         train_callbacks = [c for c in callbacks if isinstance(c, TrainingCallback)]
-        prediction_callbacks = [c for c in callbacks if isinstance(c, PredictionCallback)]
-        self._exec_callbacks(train_callbacks, 'before_training', self.model, epochs)
+        prediction_callbacks = [
+            c for c in callbacks if isinstance(c, PredictionCallback)
+        ]
+        self._exec_callbacks(train_callbacks, "before_training", self.model, epochs)
 
         # 1.2) Metrics
-        if eval_val and 'loss' in kwargs:
-            val_metrics = {**metrics, **{'loss': kwargs['loss']}}
+        if eval_val and "loss" in kwargs:
+            val_metrics = {**metrics, **{"loss": kwargs["loss"]}}
         else:
             val_metrics = metrics
 
         # 1.3) Data loading
+        train_iterator = None
         if iterable_data:
             train_iterator = iter(train_data)
 
@@ -158,11 +181,13 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         self.model.to(self.device)
 
         # 1.5) Valid kwargs
-        train_kwargs = {k: v for k, v in kwargs.items() if not k.startswith('eval_')}
+        train_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("eval_")}
         dynamic_train_kwargs = {
-            k: v for k, v in train_kwargs.items() if isinstance(v, ValueTrainingCallback)
+            k: v
+            for k, v in train_kwargs.items()
+            if isinstance(v, ValueTrainingCallback)
         }
-        eval_kwargs = {k[5:]: v for k, v in kwargs.items() if k.startswith('eval_')}
+        eval_kwargs = {k[5:]: v for k, v in kwargs.items() if k.startswith("eval_")}
         dynamic_eval_kwargs = {
             k: v for k, v in eval_kwargs.items() if isinstance(v, ValueTrainingCallback)
         }
@@ -172,7 +197,7 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
             # 2.1) Prepare
             try:
                 self._exec_callbacks(
-                    train_callbacks, 'before_epoch', current_epoch, batch_iterations
+                    train_callbacks, "before_epoch", current_epoch, batch_iterations
                 )
             except CallbackException as e:
                 exception = e
@@ -188,44 +213,60 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
             for _ in range(batch_iterations):
                 train_kwargs = {
                     **train_kwargs,
-                    **{k: v.read() for k, v in dynamic_train_kwargs.items()}
+                    **{k: v.read() for k, v in dynamic_train_kwargs.items()},
                 }
-                item = next(train_iterator)
+                item = next(train_iterator)  # type: ignore
                 item = self.to_device(self.device, item)
                 loss = self.train_batch(item, **train_kwargs)
                 batch_losses.append(loss)
-                self._exec_callbacks(train_callbacks, 'after_batch', _strip_metrics(loss))
+                self._exec_callbacks(
+                    train_callbacks, "after_batch", _strip_metrics(loss)
+                )
 
             # 2.3) Validate
             epoch_metrics = self.collate_losses(batch_losses)
             eval_kwargs = {
                 **eval_kwargs,
-                **{k: v.read() for k, v in dynamic_eval_kwargs.items()}
+                **{k: v.read() for k, v in dynamic_eval_kwargs.items()},
             }
-            do_val = eval_every is None or iterable_data or \
-                current_epoch % eval_every == 0 or current_epoch == epochs - 1
+            do_val = (
+                eval_every is None
+                or iterable_data
+                or current_epoch % eval_every == 0
+                or current_epoch == epochs - 1
+            )
 
             if val_data is not None and do_val:
                 eval_metrics = self.evaluate(
-                    val_data, iterations=val_iterations, metrics=val_metrics,
-                    callbacks=prediction_callbacks, gpu=None, **eval_kwargs
+                    val_data,
+                    iterations=val_iterations,
+                    metrics=val_metrics,
+                    callbacks=prediction_callbacks,
+                    gpu=None,
+                    **eval_kwargs,
                 )
                 epoch_metrics = {
-                    **epoch_metrics, **{f'val_{k}': v for k, v in eval_metrics.items()}
+                    **epoch_metrics,
+                    **{f"val_{k}": v for k, v in eval_metrics.items()},
                 }
 
             if eval_train and do_val:
                 eval_metrics = self.evaluate(
-                    train_data, iterations=val_iterations, metrics=metrics,
-                    callbacks=prediction_callbacks, gpu=None, **eval_kwargs
+                    train_data,
+                    iterations=val_iterations,
+                    metrics=metrics,
+                    callbacks=prediction_callbacks,
+                    gpu=None,
+                    **eval_kwargs,
                 )
                 epoch_metrics = {
-                    **epoch_metrics, **{f'train_{k}': v for k, v in eval_metrics.items()}
+                    **epoch_metrics,
+                    **{f"train_{k}": v for k, v in eval_metrics.items()},
                 }
 
             # 2.4) Finish epoch
             try:
-                self._exec_callbacks(train_callbacks, 'after_epoch', epoch_metrics)
+                self._exec_callbacks(train_callbacks, "after_epoch", epoch_metrics)
             except CallbackException as e:
                 exception = e
                 break
@@ -233,11 +274,11 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         # 3) Finish training
         # 3.1) If GPU used
         if gpu is not None:
-            self.model.to('cpu', non_blocking=True)
+            self.model.to("cpu", non_blocking=True)
             self.device = None
 
         # 3.2) Finish callbacks
-        self._exec_callbacks(train_callbacks, 'after_training')
+        self._exec_callbacks(train_callbacks, "after_training")
         if exception is not None:
             if isinstance(exception, CallbackException):
                 exception.print()
@@ -246,9 +287,17 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
 
         return history
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # EVALUATION
-    def evaluate(self, data, iterations=None, metrics=None, callbacks=None, gpu='auto', **kwargs):
+    def evaluate(
+        self,
+        data,
+        iterations=None,
+        metrics=None,
+        callbacks=None,
+        gpu: GpuSpec = "auto",
+        **kwargs,
+    ):
         """
         Evaluates the model on the given data and computes the supplied metrics.
 
@@ -287,7 +336,9 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
 
         # Setup
         num_predictions = iterations or len(data)
-        self._exec_callbacks(callbacks, 'before_predictions', self.model, num_predictions)
+        self._exec_callbacks(
+            callbacks, "before_predictions", self.model, num_predictions
+        )
 
         # Ensure GPU
         if gpu is not None:
@@ -307,15 +358,15 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
             with torch.no_grad():
                 eval_out = self.eval_batch(item, **kwargs)
 
-            evals.append(self.to_device('cpu', eval_out))
-            self._exec_callbacks(callbacks, 'after_batch', None)
+            evals.append(self.to_device("cpu", eval_out))
+            self._exec_callbacks(callbacks, "after_batch", None)
 
-        self._exec_callbacks(callbacks, 'after_predictions')
+        self._exec_callbacks(callbacks, "after_predictions")
 
         evals = self.collate_evals(evals)
 
         if gpu is not None:
-            self.model.to('cpu', non_blocking=True)
+            self.model.to("cpu", non_blocking=True)
             self.device = None
 
         return {
@@ -323,9 +374,9 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
             for key, metric in metrics.items()
         }
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # PREDICTIONS
-    def predict(self, data, iterations=None, callbacks=None, gpu='auto', **kwargs):
+    def predict(self, data, iterations=None, callbacks=None, gpu="auto", **kwargs):
         """
         Computes predictions for the given samples.
 
@@ -363,7 +414,9 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         # 2) Setup data loading
         num_iterations = iterations or len(data)
 
-        self._exec_callbacks(callbacks, 'before_predictions', self.model, num_iterations)
+        self._exec_callbacks(
+            callbacks, "before_predictions", self.model, num_iterations
+        )
 
         # 3) Make sure that the model is not data parallel, we don't need this for predicting
         if isinstance(self.model, nn.DataParallel):
@@ -382,15 +435,15 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
             x = self.to_device(device, x)
             with torch.no_grad():
                 out = self.predict_batch(x, **kwargs)
-            out = self.to_device('cpu', out)
+            out = self.to_device("cpu", out)
             predictions.append(out)
-            self._exec_callbacks(callbacks, 'after_batch', None)
+            self._exec_callbacks(callbacks, "after_batch", None)
 
-        self._exec_callbacks(callbacks, 'after_predictions')
+        self._exec_callbacks(callbacks, "after_predictions")
 
         return self.collate_predictions(predictions)
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # BATCH PROCESSING
     @abstractmethod
     def train_batch(self, data, **kwargs):
@@ -457,7 +510,7 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         """
         return forward(self.model, data)
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # COLLATION FUNCTIONS
     def collate_losses(self, losses):
         """
@@ -491,13 +544,13 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
             return {k: sum(v) / len(v) for k, v in result.items()}
 
         if isinstance(ref, (list, tuple)):
-            result = [[] for _ in len(ref)]
+            result = [[] for _ in range(len(ref))]
             for item in losses:
                 for i, it in enumerate(item):
                     result[i].append(it)
-            return {f'loss_{i}': sum(r) / len(r) for i, r in enumerate(result)}
+            return {f"loss_{i}": sum(r) / len(r) for i, r in enumerate(result)}
 
-        return {'loss': sum(losses) / len(losses)}
+        return {"loss": sum(losses) / len(losses)}
 
     def collate_evals(self, evals):
         """
@@ -536,7 +589,7 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         """
         return self._collate(predictions)
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # OVERRIDABLE UTILITY FUNCTIONS
     def to_device(self, device, item):
         """
@@ -560,10 +613,10 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
         """
         return to_device(device, item)
 
-    #----------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------
     # UTILITY FUNCTIONS
     def _gpu_descriptor(self, gpu):
-        if gpu == 'auto':
+        if gpu == "auto":
             if cuda.device_count() == 0:
                 return False
             if self.supports_multiple_gpus():
@@ -602,7 +655,7 @@ class Engine(TrainingCallback, PredictionCallback, ABC):
 def _strip_metrics(metrics):
     # If `metrics` is a dict, we remove all keys starting with an underscore
     if isinstance(metrics, dict):
-        return {k: v for k, v in metrics.items() if not k.startswith('_')}
+        return {k: v for k, v in metrics.items() if not k.startswith("_")}
     return metrics
 
 

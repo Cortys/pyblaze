@@ -10,7 +10,7 @@ class MADE(nn.Module):
     non-linearity between them.
     """
 
-    def __init__(self, *dims, activation=nn.LeakyReLU()):
+    def __init__(self, *dims, activation: nn.Module = nn.LeakyReLU()):
         """
         Initializes a new MADE model as a sequence of masked linear layers.
 

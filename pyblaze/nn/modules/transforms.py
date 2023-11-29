@@ -380,7 +380,7 @@ class MaskedAutoregressiveTransform1d(_Transform):
     (Papamakarios et al., 2018).
     """
 
-    def __init__(self, dim, *hidden_dims, activation=nn.LeakyReLU(), constrain_scale=False):
+    def __init__(self, dim, *hidden_dims, activation: nn.Module=nn.LeakyReLU(), constrain_scale=False):
         """
         Initializes a new MAF transform that is backed by a :class:`pyblaze.nn.MADE` model.
 
